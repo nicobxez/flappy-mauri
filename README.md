@@ -1,10 +1,10 @@
-# Flappy Kiro
+# Flappy Mauri
 
-Initial folder containing support resources for the Flappy Kiro game.
+Initial folder containing support resources for the Flappy Mauri game.
 
 ## Example UI
 
-![Flappy Kiro UI](img/example-ui.png)
+![Flappy Mauri UI](img/example-ui.png)
 
 ## Resources
 

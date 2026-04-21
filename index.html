@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Flappy Mauri</title>
+<style>
+  * { margin: 0; padding: 0; }
+  body { background: #000; overflow: hidden; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<img id="ghosty" src="assets/ghosty.png" style="display:none">
+<script>
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+
+// Logical game resolution (fixed)
+const LW = 480, LH = 640;
+
+// Scale canvas to fill the browser window
+function resize() {
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// --- Constants ---
+const GRAVITY       = 0.5;
+const JUMP_VEL      = -9;
+const WALL_W        = 60;
+const GAP           = 180;
+const BASE_SPEED    = 3;
+const SPEED_STEP    = 0.4;
+const SCORE_STEP    = 5;
+const WALL_INTERVAL = 220;
+const CYCLE_SECS    = 20;
+const GHOSTY_W      = 40;
+const GHOSTY_H      = 55;
+const GHOSTY_X      = 60;
+
+const DAY_BG     = [100, 160, 230];
+const NIGHT_BG   = [10,  10,  40];
+const DAY_WALL   = [80,  40, 100];
+const NIGHT_WALL = [20,  10,  30];
+
+// --- Assets ---
+const ghostyImg = document.getElementById('ghosty');
+const jumpSnd   = new Audio('assets/jump.wav');
+const overSnd   = new Audio('assets/game_over.mp4');
+jumpSnd.volume  = 0.5;
+overSnd.volume  = 0.6;
+
+// --- State ---
+let gy, gvy, walls, score, best, phase, cycleT, lastTime, wallTimer, speed;
+
+// Static clouds (logical coords, seeded once)
+const CLOUDS = Array.from({length: 5}, (_, i) => ({
+  x: 0.1 + i * 0.18, y: 0.08 + (i % 3) * 0.07, r: 28 + (i % 3) * 14
+}));
+
+// Static stars (random positions, seeded once)
+const STARS = Array.from({length: 40}, () => ({
+  x: Math.random() * 100,
+  y: Math.random() * 60,
+  r: 1 + Math.random() * 2
+}));
+let _scale = 1, _ox = 0; // updated each draw frame
+
+// Right edge of browser in logical coordinates
+function rightEdge() { return (canvas.width - _ox) / _scale; }
+function leftEdge()  { return -_ox / _scale; }
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+function lerpRGB(c1, c2, t) {
+  return `rgb(${~~lerp(c1[0],c2[0],t)},${~~lerp(c1[1],c2[1],t)},${~~lerp(c1[2],c2[2],t)})`;
+}
+function nightFactor(t) {
+  const p = (t % 1 + 1) % 1;
+  return p < 0.5 ? p * 2 : (1 - p) * 2;
+}
+
+function reset() {
+  gy = LH / 2; gvy = 0; walls = []; score = 0;
+  wallTimer = 0; speed = BASE_SPEED; cycleT = 0; lastTime = null;
+}
+
+const JIRA_TICKETS = [
+  { title: 'Fix ghost collision',   desc: 'Ghost clips through walls on low FPS' },
+  { title: 'Add jump animation',    desc: 'Ghosty needs a flap sprite sequence' },
+  { title: 'Tune gravity constant', desc: 'Current value feels too floaty' },
+  { title: 'Implement high score',  desc: 'Persist best score in localStorage' },
+  { title: 'Day/night cycle',       desc: 'Background should shift over time' },
+  { title: 'Spawn rate scaling',    desc: 'Increase wall speed with score' },
+  { title: 'Add sound effects',     desc: 'Play audio on jump and game over' },
+  { title: 'Mobile touch support',  desc: 'Tap to flap on touch devices' },
+  { title: 'Score counter HUD',     desc: 'Display current score on screen' },
+  { title: 'Game over screen',      desc: 'Show score and restart prompt' },
+  { title: 'Responsive canvas',     desc: 'Fill full browser viewport' },
+  { title: 'Cloud parallax',        desc: 'Animate background clouds slowly' },
+];
+let _ticketIdx = 0;
+let _ticketId  = 100;
+function nextTicket() {
+  const t = JIRA_TICKETS[_ticketIdx++ % JIRA_TICKETS.length];
+  return { ...t, id: _ticketId++ };
+}
+
+function spawnWall(x) {
+  const minY = 60, maxY = LH - 60 - GAP;
+  const t = nextTicket();
+  walls.push({ x, gapY: minY + Math.random() * (maxY - minY), scored: false, ticket: t });
+}
+
+function jump() {
+  gvy = JUMP_VEL;
+  jumpSnd.currentTime = 0;
+  jumpSnd.play().catch(() => {});
+}
+
+function startGame() { reset(); phase = 'play'; }
+
+document.addEventListener('keydown', e => {
+  if (e.code !== 'Space') return;
+  e.preventDefault();
+  if (phase === 'start') startGame();
+  else if (phase === 'play') jump();
+  else if (phase === 'over') phase = 'start';
+});
+canvas.addEventListener('pointerdown', () => {
+  if (phase === 'start') startGame();
+  else if (phase === 'play') jump();
+  else if (phase === 'over') phase = 'start';
+});
+
+function update(dt) {
+  cycleT += dt / CYCLE_SECS;
+  gvy += GRAVITY;
+  gy  += gvy;
+
+  wallTimer += speed;
+  if (wallTimer >= WALL_INTERVAL) {
+    spawnWall((walls.length ? walls[walls.length - 1].x : rightEdge()) + WALL_INTERVAL);
+    wallTimer = 0;
+  }
+
+  for (const w of walls) {
+    w.x -= speed;
+    if (!w.scored && w.x + WALL_W < GHOSTY_X) {
+      w.scored = true;
+      score++;
+      speed = BASE_SPEED + Math.floor(score / SCORE_STEP) * SPEED_STEP;
+    }
+  }
+  while (walls.length && walls[0].x + WALL_W < leftEdge()) walls.shift();
+  if (!walls.length) spawnWall(rightEdge() + WALL_INTERVAL);
+
+  if (gy + GHOSTY_H >= LH || gy <= 0) return gameOver();
+  const HIT_MARGIN = 8; // pixels of forgiveness on each side
+  for (const w of walls) {
+    if (GHOSTY_X + GHOSTY_W - HIT_MARGIN > w.x + HIT_MARGIN &&
+        GHOSTY_X + HIT_MARGIN < w.x + WALL_W - HIT_MARGIN) {
+      if (gy + HIT_MARGIN < w.gapY || gy + GHOSTY_H - HIT_MARGIN > w.gapY + GAP) return gameOver();
+    }
+  }
+}
+
+function gameOver() {
+  overSnd.currentTime = 0;
+  overSnd.play().catch(() => {});
+  best = Math.max(score, best || 0);
+  localStorage.setItem('fk_best', best);
+  phase = 'over';
+}
+
+function drawTicketWall(ctx, w, nf) {
+  const cardW  = WALL_W + 16;
+  const cardX  = w.x - 8;
+  const radius = 6;
+  const bg = lerpRGB([244,245,247],[26,26,46],   nf);
+  const ac = lerpRGB([0,82,204],   [74,144,217], nf);
+  const tx = lerpRGB([23,43,77],   [200,214,229],nf);
+
+  function card(x, y, h) {
+    ctx.save();
+    // clip to card bounds to prevent text overflow
+    ctx.beginPath();
+    ctx.roundRect(x, y, cardW, h, radius);
+    ctx.clip();
+    // card body
+    ctx.fillStyle = bg;
+    ctx.fillRect(x, y, cardW, h);
+    // top accent bar
+    ctx.fillStyle = ac;
+    ctx.fillRect(x, y, cardW, 6);
+    // ticket id
+    ctx.fillStyle = ac;
+    ctx.font = 'bold 7px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('FK-' + w.ticket.id, x + 6, y + 18);
+    // title
+    ctx.fillStyle = tx;
+    ctx.font = 'bold 7px sans-serif';
+    const words = w.ticket.title.split(' ');
+    let line = '', ly = y + 30;
+    for (const word of words) {
+      if ((line + word).length > 13) { ctx.fillText(line.trim(), x + 6, ly); ly += 10; line = ''; }
+      line += word + ' ';
+    }
+    if (line.trim()) { ctx.fillText(line.trim(), x + 6, ly); ly += 10; }
+    // desc
+    ctx.fillStyle = lerpRGB([100,110,130],[140,160,180], nf);
+    ctx.font = '6px sans-serif';
+    const dwords = w.ticket.desc.split(' ');
+    let dl = '', dy = ly + 4;
+    for (const dw of dwords) {
+      if ((dl + dw).length > 16) { ctx.fillText(dl.trim(), x + 6, dy); dy += 8; dl = ''; }
+      dl += dw + ' ';
+    }
+    if (dl.trim()) ctx.fillText(dl.trim(), x + 6, dy);
+    ctx.restore();
+  }
+
+  // Top wall: stack of cards from top down to gap
+  const cardH = 90;
+  for (let y = 0; y < w.gapY - 4; y += cardH + 4) {
+    const h = Math.min(cardH, w.gapY - 4 - y);
+    if (h < 20) break;
+    card(cardX, y, h);
+  }
+  // Bottom wall: stack of cards from gap down
+  for (let y = w.gapY + GAP + 4; y < LH - 20; y += cardH + 4) {
+    const h = Math.min(cardH, LH - 20 - y);
+    if (h < 20) break;
+    card(cardX, y, h);
+  }
+}
+
+function draw() {
+  const cw = canvas.width, ch = canvas.height;
+  const nf = nightFactor(cycleT);
+
+  // Fill entire browser canvas with background colour
+  ctx.fillStyle = lerpRGB(DAY_BG, NIGHT_BG, nf);
+  ctx.fillRect(0, 0, cw, ch);
+
+  // Scale and center the logical game area
+  const scale = Math.min(cw / LW, ch / LH);
+  const ox = (cw - LW * scale) / 2;
+  _scale = scale; _ox = ox;
+  const oy = (ch - LH * scale) / 2;
+
+  // Stars (visible at night)
+  if (nf > 0.05) {
+    ctx.fillStyle = `rgba(255,255,255,${nf * 0.9})`;
+    for (const s of STARS) {
+      ctx.beginPath();
+      ctx.arc(s.x / 100 * cw, s.y / 100 * ch, s.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Clouds (visible during day)
+  if (nf < 0.6) {
+    const alpha = Math.max(0, (0.6 - nf) / 0.6) * 0.75;
+    for (const c of CLOUDS) {
+      const cx = c.x * cw, cy = c.y * ch, r = c.r;
+      const pad = r * 2.5;
+      const oc = document.createElement('canvas');
+      const lm = r * 0.8; // left margin to prevent clipping
+      oc.width  = Math.ceil(r * 3.5 + pad + lm);
+      oc.height = Math.ceil(r * 2   + pad);
+      const ox2 = oc.getContext('2d');
+      ox2.fillStyle = '#fff';
+      for (const [bx, by, br] of [[lm + r * 1.5, r + pad / 2, r], [lm + r * 1.5 + r, r + pad / 2 - r * 0.3, r * 0.75], [lm + r * 1.5 - r, r + pad / 2 - r * 0.2, r * 0.6]]) {
+        ox2.beginPath();
+        ox2.arc(bx, by, br, 0, Math.PI * 2);
+        ox2.fill();
+      }
+      ctx.globalAlpha = alpha;
+      ctx.drawImage(oc, cx - r * 1.5 - lm, cy - r - pad / 2);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // Sun / Moon (partially off top-right corner)
+  const bodyColor = lerpRGB([255, 220, 50], [255, 255, 255], nf);
+  ctx.beginPath();
+  ctx.arc(cw - 40, 40, 70, 0, Math.PI * 2);
+  ctx.fillStyle = bodyColor;
+  ctx.fill();
+
+  // Ground at full browser width (positioned at bottom of scaled game area)
+  const groundH = 20 * scale;
+  ctx.fillStyle = lerpRGB([60,120,40],[10,30,10], nf);
+  ctx.fillRect(0, oy + LH * scale - groundH, cw, groundH);
+
+  ctx.save();
+  ctx.translate(ox, oy);
+  ctx.scale(scale, scale);
+
+  const wallColor = lerpRGB(DAY_WALL, NIGHT_WALL, nf);
+
+  // Walls as Jira tickets
+  for (const w of walls) {
+    drawTicketWall(ctx, w, nf);
+  }
+
+  // Ghosty
+  if (ghostyImg.complete && ghostyImg.naturalWidth) {
+    ctx.drawImage(ghostyImg, GHOSTY_X, gy, GHOSTY_W, GHOSTY_H);
+  } else {
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(GHOSTY_X, gy, GHOSTY_W, GHOSTY_H);
+  }
+
+  // HUD
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.font = '14px monospace';
+  ctx.fillText('best score: ' + (best || 0), LW / 2, 24);
+  ctx.font = 'bold 28px monospace';
+  ctx.fillText(score, LW / 2, 52);
+
+  ctx.restore();
+
+  // Overlay at full browser size
+  if (phase === 'start' || phase === 'over') {
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(0, 0, cw, ch);
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    if (phase === 'start') {
+      ctx.font = 'bold 40px monospace';
+      ctx.fillText('Flappy Kiro', cw / 2, ch / 2 - 40);
+      ctx.font = '22px monospace';
+      ctx.fillText('Press SPACE or tap to start', cw / 2, ch / 2 + 10);
+    } else {
+      ctx.font = 'bold 40px monospace';
+      ctx.fillText('Game Over', cw / 2, ch / 2 - 40);
+      ctx.font = '22px monospace';
+      ctx.fillText(`Score: ${score}`, cw / 2, ch / 2 + 10);
+      ctx.fillText(`Best: ${best}`, cw / 2, ch / 2 + 44);
+    }
+    ctx.font = '18px monospace';
+    ctx.fillStyle = '#ccc';
+    ctx.fillText('Press SPACE or tap to continue', cw / 2, ch / 2 + 90);
+  }
+}
+
+function loop(ts) {
+  requestAnimationFrame(loop);
+  if (!lastTime) lastTime = ts;
+  const dt = Math.min((ts - lastTime) / 1000, 0.05);
+  lastTime = ts;
+  if (phase === 'play') update(dt);
+  draw();
+}
+
+best  = parseInt(localStorage.getItem('fk_best')) || 0;
+phase = 'start';
+reset();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
